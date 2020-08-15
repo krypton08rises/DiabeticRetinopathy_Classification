@@ -19,43 +19,42 @@ import datetime
 import time
 from os import path
 
-# Default dimensions we found online
-img_width, img_height = 600, 400
+img_width, img_height = 600, 400    #  important to note - default dimensions used with VGG are 224*224
 
-# Create a bottleneck file
-top_model_weights_path = 'bottleneck_fc_model.h5'  # loading up our datasets || model weights
+top_model_weights_path = 'bottleneck_fc_vgg19.h5'  # loading/saving model weights
 train_data_dir = './finalDataset/train/'
 validation_data_dir = './finalDataset/val/'
-# test_data_dir = ‘data / test’
 
 # number of epochs to train top model
-num_epochs = 10  # this has been changed after multiple model run
+num_epochs = 10
 # batch size used by flow_from_directory and predict_generator
 batch_size = 16
 
-# Loading vgc16 model
-vgg16 = applications.VGG16(include_top=False, weights='imagenet')
+# Loading vgg16/vgg19 model
+vgg16 = applications.VGG19(include_top=False, weights='imagenet')
 datagen = ImageDataGenerator(rescale=1./255)
-# needed to create the bottleneck .npy files
 
-# __this can take an hour and half to run so only run it once.
-# once the npy files have been created, no need to run again. Convert this cell to a code cell to run.__
+# comment the following after running it once!!!
 
 start = datetime.datetime.now()
 print("Starting vgg predictions :")
 
-generator = datagen.flow_from_directory(train_data_dir,
+generator = datagen.flow_from_directory(directory=train_data_dir,
                                         target_size=(img_width, img_height),
                                         batch_size=batch_size,
-                                        class_mode=None,
+                                        class_mode="binary",
                                         shuffle=False)
 
 generator_val = datagen.flow_from_directory(validation_data_dir,
                                             target_size=(img_width, img_height),
                                             batch_size=batch_size,
-                                            class_mode=None,
+                                            class_mode="binary",
                                             shuffle=False)
 
+print(generator[0][0][0].shape)
+print(generator[0][0][0])
+print(generator_val[0][0][0].shape)
+print(generator_val[0][0][0])
 nb_train_samples = len(generator.filenames)
 nb_val_samples = len(generator_val.filenames)
 
@@ -67,25 +66,25 @@ predict_size_val = int(math.ceil(nb_val_samples/batch_size))
 bottleneck_features_train = vgg16.predict_generator(generator, predict_size_train)
 bottleneck_features_val = vgg16.predict_generator(generator_val, predict_size_val)
 
-np.save('bottleneck_features_train.npy', bottleneck_features_train)
-np.save('bottleneck_features_val.npy', bottleneck_features_val)
+np.save('vgg19_bottleneck_features_train.npy', bottleneck_features_train)
+np.save('vgg19_bottleneck_features_val.npy', bottleneck_features_val)
 
-print("Saving vgg predictions! ")
+print("Saving vgg 19 predictions! ")
 end = datetime.datetime.now()
 elapsed = end - start
 print('Time: ', elapsed)
 
 # training data
-generator_top = datagen.flow_from_directory(train_data_dir,
+generator_top = datagen.flow_from_directory(directory=train_data_dir,
                                             target_size=(img_width, img_height),
                                             batch_size=batch_size,
-                                            class_mode='binary',
+                                            class_mode="binary",
                                             shuffle=False)
 
-generator_val_top = datagen.flow_from_directory(validation_data_dir,
+generator_val_top = datagen.flow_from_directory(directory=validation_data_dir,
                                                 target_size=(img_width, img_height),
                                                 batch_size=batch_size,
-                                                class_mode='binary',
+                                                class_mode="binary",
                                                 shuffle=False)
 
 
@@ -94,31 +93,32 @@ num_classes = len(generator_top.class_indices)
 
 
 # print("Found {} classes".format(num_classes))
-# load the bottleneck features saved earlier
 # train_data = bottleneck_features_train
-train_data = np.load('bottleneck_features_train.npy')
-validation_data = np.load('bottleneck_features_val.npy')
 
-# get the class labels for the training data, in the original order
+train_data = np.load('./features/vgg19/vgg19_bottleneck_features_train.npy')
+validation_data = np.load('./features/vgg19/vgg19_bottleneck_features_val.npy')
+
+
 train_labels = generator_top.classes
 val_labels = generator_val_top.classes
 
-# convert the training labels to categorical vectors
 train_labels = to_categorical(train_labels, num_classes=num_classes)
 validation_labels = to_categorical(val_labels, num_classes=num_classes)
 
-# This is the best model we found. For additional models, check out I_notebook.ipynb
-print(train_data.shape)
-print(train_data.shape[1:])
+# print(train_data.shape)
+# print(train_data.shape[1:])
 start = datetime.datetime.now()
+
+# Dense layers
 model = Sequential()
 model.add(Flatten(input_shape=train_data.shape[1:]))
 model.add(Dense(100, activation=keras.layers.LeakyReLU(alpha=0.3)))
 model.add(Dropout(0.3))
 model.add(Dense(50, activation=keras.layers.LeakyReLU(alpha=0.3)))
-model.add(Dropout(0.3))
+# model.add(Dropout(0.3))
 model.add(Dense(num_classes, activation='sigmoid'))
 
+# model.summary()
 if path.exists(top_model_weights_path):
     model.load_weights(top_model_weights_path)
 
@@ -132,31 +132,33 @@ history = model.fit(train_data, train_labels,
                     validation_data=(validation_data, validation_labels))
 
 model.save_weights(top_model_weights_path)
-
 (eval_loss, eval_accuracy) = model.evaluate(validation_data, validation_labels, batch_size=batch_size, verbose=1)
 
-prediction = model.predict(validation_data)
+filenames = generator_val_top.filenames
+pred = model.predict(validation_data)
+predictions = np.argmax(pred, axis=1)
+
+labels = (generator_top.class_indices)
+labels = dict((v,k) for k,v in labels.items())
+print(labels)
+predictions = [labels[k] for k in predictions]
+
+results=pd.DataFrame({"Filename":filenames,
+                      "Predictions":predictions})
+results.to_csv("results.csv", index=False)
 # print(validation_data.shape)
 # print(train_data.shape)
-
-# p = np.zeros((2))           # p[0]=tp, p[1]=fp, p[2]=fn, p[3]=tn
-
-# for i in range(len(validation_data)):
-#     if validation_labels==1 and prediction[i][0]>prediction[i][1] :
-#         p[0]+=1
-#     elif validation_labels == 0 and prediction[i][0]<prediction[i][1]:
-#         p[1]+=1
-
-    # print(validation_labels[i], prediction[i])
-
-# sensitivity = p[0]/prediction.shape[0]
-# specificity = p[1]/prediction.shape[0]
 
 print('[INFO] accuracy: {:.2f}%'.format(eval_accuracy * 100))
 print("[INFO] Loss: {}".format(eval_loss))
 end = datetime.datetime.now()
 elapsed = end - start
 print('Time: ', elapsed)
+
+
+
+
+
 
 # Graphing our training and validation
 # acc = history.history['acc']
@@ -178,3 +180,17 @@ print('Time: ', elapsed)
 # plt.xlabel('epoch')
 # plt.legend()
 # plt.show()
+
+
+# p = np.zeros((2))           # p[0]=tp, p[1]=fp, p[2]=fn, p[3]=tn
+
+# for i in range(len(validation_data)):
+#     if validation_labels==1 and prediction[i][0]>prediction[i][1] :
+#         p[0]+=1
+#     elif validation_labels == 0 and prediction[i][0]<prediction[i][1]:
+#         p[1]+=1
+
+# print(validation_labels[i], prediction[i])
+
+# sensitivity = p[0]/prediction.shape[0]
+# specificity = p[1]/prediction.shape[0]
