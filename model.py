@@ -8,9 +8,9 @@ from keras.callbacks import ModelCheckpoint, EarlyStopping
 import numpy as np
 
 tr_data = ImageDataGenerator(rescale=1. / 255)
-batchsize=4
+batchsize = 4
 train_data_generator = tr_data.flow_from_directory(directory='./finalDataset/train',
-                                                   target_size=(600, 400),
+                                                   target_size=(200, 135),
                                                    batch_size=batchsize,
                                                    class_mode=None,
                                                    shuffle=True)
@@ -21,11 +21,6 @@ test_data_generator = ts_data.flow_from_directory(directory='./finalDataset/val'
                                                   batch_size=batchsize,
                                                   class_mode=None,
                                                   shuffle=True)
-
-# print(train_data_generator.image_shape)
-# print(train_data_generator[0])
-print("next image:")
-# print(train_data_generator[1])
 
 num_classes = len(train_data_generator.class_indices)
 
@@ -74,14 +69,14 @@ checkpoint = ModelCheckpoint("vgg16_1.h5",
                              mode='auto',
                              period=1)
 
-# early = EarlyStopping(monitor='val_acc', min_delta=0, patience=20, verbose=1, mode='auto')
+early = EarlyStopping(monitor='val_acc', min_delta=0, patience=20, verbose=1, mode='auto')
 
-hist = model.fit_generator(steps_per_epoch=len(train_data_generator.filenames)/batchsize,
+hist = model.fit_generator(steps_per_epoch=len(train_data_generator.filenames) / batchsize,
                            generator=train_data_generator,
                            validation_data=test_data_generator,
                            validation_steps=10,
-                           epochs=0,
-                           callbacks=[checkpoint])      #, early])
+                           epochs=10,
+                           callbacks=[checkpoint, early])
 
 model.save_weights('model_vgg16.h5')
 
