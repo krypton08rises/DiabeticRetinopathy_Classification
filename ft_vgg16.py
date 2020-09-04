@@ -7,30 +7,32 @@ import matplotlib.pyplot as plt
 import keras as K
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as pyplot
 import tensorflow as tf
 
 from keras import __version__
 # from keras.applications.inception_v3 import InceptionV3, preprocess_input
+from metrics import metric
 from keras import applications
 from keras.models import Model
 from keras.layers import Dense, GlobalAveragePooling2D
 from keras.preprocessing.image import ImageDataGenerator
 from keras.optimizers import SGD, Adam
-from sklearn.metrics import roc_curve
-from sklearn.metrics import roc_auc_score
+from keras.metrics import categorical_accuracy
+from sklearn.metrics import roc_curve, roc_auc_score, accuracy_score, classification_report, cohen_kappa_score
 from keras.utils.np_utils import to_categorical
-from keras.callbacks import Callback, ModelCheckpoint
+from keras.callbacks import Callback, ModelCheckpoint, EarlyStopping
 from tensorflow.metrics import precision, recall, auc
 
 IM_WIDTH, IM_HEIGHT = 224, 224  # fixed size for InceptionV3
-NB_EPOCHS = 0
+NB_EPOCHS_TL = 0
+NB_EPOCHS_FT = 20
 BAT_SIZE = 16
 FC_SIZE = 1024
 NB_VGG_LAYERS_TO_FREEZE = 10
 
 
 def get_nb_files(directory):
-
     """
     Get number of files by searching directory recursively
     """
@@ -49,11 +51,12 @@ def setup_to_transfer_learn(model, base_model):
     """Freeze all layers and compile the model"""
     for layer in base_model.layers:
         layer.trainable = False
-    model.compile(optimizer=Adam(lr=0.0001), loss='binary_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer=Adam(lr=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
 
 
 def add_new_last_layer(base_model, nb_classes):
-    """Add last layer to the convnet
+    """
+    Add last layer to the convnet
   Args:
     base_model: keras model excluding top
     nb_classes: # of classes
@@ -63,7 +66,7 @@ def add_new_last_layer(base_model, nb_classes):
     x = base_model.output
     x = GlobalAveragePooling2D()(x)
     x = Dense(FC_SIZE, activation='relu')(x)  # new FC layer, random init
-    predictions = Dense(nb_classes, activation='softmax')(x)  # new softmax layer
+    predictions = Dense(nb_classes, activation='sigmoid')(x)  # new softmax layer
     model = Model(input=base_model.input, output=predictions)
     return model
 
@@ -85,9 +88,12 @@ def setup_to_finetune(model):
     #               loss='binary_crossentropy',
     #               metrics=['accuracy', 'auc'])
     model.compile(optimizer=SGD(lr=0.0001, momentum=0.9),
-                  loss='binary_crossentropy',
-                  metrics=['accuracy'])
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy', 'categorical_accuracy'])
 
+
+# def quadratic_kappa(y_hat, y):
+# return torch.tensor(cohen_kappa_score(torch.argmax(y_hat,1), y, weights='quadratic'),device='cuda:0')
 
 
 def train(args):
@@ -97,13 +103,14 @@ def train(args):
     nb_train_samples = get_nb_files(args.train_dir)
     nb_classes = len(glob.glob(args.train_dir + "/*"))
     nb_val_samples = get_nb_files(args.val_dir)
-    nb_epoch = int(args.nb_epoch)
+    # nb_epoch = int(args.nb_epoch)
     batch_size = int(args.batch_size)
     # print(nb_val_samples // batch_size)
 
     # data prep
     train_datagen = ImageDataGenerator(rescale=1. / 255)
     test_datagen = ImageDataGenerator(rescale=1. / 255)
+
     # train_datagen = ImageDataGenerator(
     #     preprocessing_function=preprocess_input,
     #     rotation_range=30,
@@ -114,7 +121,7 @@ def train(args):
     #     horizontal_flip=True
     # )
     # test_datagen = ImageDataGenerator(
-    #     preprocessing_function=preprocess_input,
+    #     preprocessing_function=preprocess_input
     #     rotation_range=30,
     #     width_shift_range=0.2,
     #     height_shift_range=0.2,
@@ -139,86 +146,124 @@ def train(args):
     validation_labels = to_categorical(val_labels, num_classes=2)
     # print("validation_labels now : ", validation_labels.shape)
 
+
+    # setting up class weights for imbalanced dataset ...
+    # Scaling by total/2 helps keep the loss to a similar magnitude.
+    # The sum of the weights of all examples stays the same.
+
+
+    neg = 27216 + 1015
+    pos = 5920 + 953
+    total = neg + pos
+    print('Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of total)\n'.format(total, pos, 100 * pos / total))
+
+    weight_for_0 = (1 / neg) * (total) / 2.0
+    weight_for_1 = (1 / pos) * (total) / 2.0
+
+    class_weight = {0: weight_for_0, 1: weight_for_1}
+
+    print('Weight for class 0: {:.2f}'.format(weight_for_0))
+    print('Weight for class 1: {:.2f}'.format(weight_for_1))
+
     # setup model
     # base_model = InceptionV3(weights='imagenet', include_top=False)  # include_top=False excludes final FC layer
-    base_model = applications.VGG16(weights='imagenet', include_top=False)
+    # base_model = applications.VGG16(weights='imagenet', include_top=False)
     # print("NUmber of vgg layers :", len(base_model.layers))
-    # number of layers in network
 
-    model = add_new_last_layer(base_model, nb_classes)
+
+    # model = add_new_last_layer(base_model, nb_classes)
 
     # transfer learning
-    setup_to_transfer_learn(model, base_model)
+    # setup_to_transfer_learn(model, base_model)
 
-    checkpoint = ModelCheckpoint("utvgg_norm.h5",
-                                 monitor='val_acc',
-                                 verbose=1,
-                                 save_best_only=True,
-                                 save_weights_only=False,
-                                 mode='auto',
-                                 period=1)
+    # checkpoint = ModelCheckpoint("ft_vgg16.h5",
+    #                              monitor=RocCallback(validation_generator),    # not working with custom callbacks
+    #                              verbose=1,
+    #                              save_best_only=True,
+    #                              save_weights_only=False,
+    #                              mode='auto',
+    #                              period=1)
 
-    history_tl = model.fit_generator(train_generator,
-                                     nb_epoch=nb_epoch,
-                                     samples_per_epoch=nb_train_samples,
-                                     validation_data=validation_generator,
-                                     nb_val_samples=nb_val_samples,
-                                     class_weight='auto',
-                                    callbacks=[RocCallback(validation_generator), checkpoint])
+    # print('Transfer Learning is starting...')
+    # history_tl = model.fit_generator(train_generator,
+    #                                  nb_epoch=NB_EPOCHS_TL,
+    #                                  samples_per_epoch=nb_train_samples,
+    #                                  validation_data=validation_generator,
+    #                                  nb_val_samples=nb_val_samples,
+    #                                  class_weight=class_weight,
+    #                                  callbacks=[RocCallback(validation_generator)])
 
-    # fine-tuning
+    model = K.models.load_model(args.output_model_file)
 
-
-    # ival = IntervalEvaluation(validation_generator=validation_generator, interval=1)
-    # roc = RocCallback(validation_generator)
-
-    # model = K.models.load_model(args.output_model_file)
+    # fine-tuning ...
     setup_to_finetune(model)
 
+    # EarlyStopping()
 
+    print('Fine tuning is starting...')
     history_ft = model.fit_generator(train_generator,
                                      samples_per_epoch=nb_train_samples,
-                                     nb_epoch=nb_epoch,
+                                     nb_epoch=NB_EPOCHS_FT,
                                      validation_data=validation_generator,
                                      nb_val_samples=nb_val_samples,
-                                     class_weight='auto',
+                                     class_weight=class_weight,
                                      callbacks=[RocCallback(validation_generator)])
 
-
-
+    # making predictions ...
+    model.save(args.output_model_file)
     pred = model.predict_generator(validation_generator,
-                                   steps=len(validation_generator.filenames)//batch_size)
+                                   steps=len(validation_generator.filenames) // batch_size)
+    pred_Y_cat = np.argmax(pred, -1)
+    for i in range(len(val_labels)):
+        print(pred[i], val_labels[i])
+    # print('Accuracy on Test Data: %2.2f%%' % (accuracy_score(validation_labels, pred_Y_cat)))
+    # print(classification_report(validation_labels, pred_Y_cat))
+
+
+    # F1Score ...
     predictions = np.argmax(pred, axis=1)
     f1score = f1_score(predictions, val_labels)
 
     print("F1 Score is", f1score)
 
-        # filenames = validation_generator.filenames
-    # labels = validation_generator.class_indices
-    # labels = dict((v, k) for k, v in labels.items())
+
+    # ROC_AUC ...
+    if NB_EPOCHS_FT == 0 and NB_EPOCHS_TL == 0:
+        test_y = [validation_labels]
+        pred_y = [pred]
+        roc_val = roc_auc_score(test_y, pred_y)
+        print('Logistic: ROC AUC=%.3f' % (roc_val))
+        lr_fpr, lr_tpr, _ = roc_curve(test_y, pred_y)
+        pyplot.plot(lr_fpr, lr_tpr, marker='.', label='Logistic')
+        pyplot.xlabel('False Positive Rate')
+        pyplot.ylabel('True Positive Rate')
+
+
+    # Storing Predictions as CSV ...
+    filenames = validation_generator.filenames
+    labels = validation_generator.class_indices
+    labels = dict((v, k) for k, v in labels.items())
     # print(labels)
-    # predictions = [labels[k] for k in predictions]
-    # results = pd.DataFrame({"Filename": filenames,
-    #                         "Predictions": predictions,
-    #                         "Label": val_labels})
-    # results.to_csv("normalised_ft_results10.csv", index=False)
-    # print(pred)
+    predictions = [labels[k] for k in predictions]
+    results = pd.DataFrame({"Filename": filenames,
+                            "Predictions": predictions,
+                            "Label": val_labels})
+    results.to_csv("ft_ci_results30.csv", index=False)
+    metric("ft_ci_results30.csv")
+    # plotting data
     # print(pred.shape, validation_labels.shape)
-    model.save(args.output_model_file)
-
-    # print(pred.shape, validation_labels.shape)
-    if args.plot:
-        plot_training(predictions, val_labels)
+    # if args.plot:
+    #     plot_training(pred, validation_labels)
 
 
-
+# Callback to area under the curve ...
 class RocCallback(Callback):
     def __init__(self, validation_data):
         # self.x = training_data[0]
         # self.y = training_data.classes
         self.x_val = validation_data
         self.y_val = to_categorical(validation_data.classes, num_classes=2)
-
+        self.best = 0
 
     def on_train_begin(self, logs={}):
         return
@@ -233,10 +278,25 @@ class RocCallback(Callback):
         # y_pred_train = self.model.predict_proba(self.x)
         # roc_train = roc_auc_score(self.y, y_pred_train)
         # y_pred_val = self.model.predict_proba(self.x_val)
-        y_pred_val = self.model.predict_generator(self.x_val, steps=len(self.x_val.filenames)//BAT_SIZE)
+        y_pred_val = self.model.predict_generator(self.x_val, steps=len(self.x_val.filenames) // BAT_SIZE)
         roc_val = roc_auc_score(self.y_val, y_pred_val)
-        # print('\rroc-auc_train: %s - roc-auc_val: %s' % (str(round(roc_train,4)),str(round(roc_val,4))),end=100*' '+'\n')
-        print('\rroc-auc_val: %s'%(str(round(roc_val, 4))), end=100*' '+'\n')
+        if NB_EPOCHS_FT == 0 and NB_EPOCHS_TL == 0:
+            lr_fpr, lr_tpr, _ = roc_curve(self.y_val, y_pred_val)
+            pyplot.plot(lr_fpr, lr_tpr, marker='.', label='Logistic')
+            pyplot.xlabel('False Positive Rate')
+            pyplot.ylabel('True Positive Rate')
+            pyplot.legend()
+            pyplot.show()
+
+        # print('\rroc-auc_train: %s - roc-auc_val: %s' % (str(round(roc_train,4)),str(round(roc_val,4))),end=100*'
+        # '+'\n')
+        print('\rroc-auc_val: %s' % (str(round(roc_val, 4))), end=100 * ' ' + '\n')
+        if roc_val > self.best:
+            print('roc score increased from %s to %s' % (str(round(self.best, 4)), str(round(roc_val, 4))),
+                  end=100 * ' ' + '\n')
+            print('Saving model ...')
+            self.best = roc_val
+            self.model.save('vgg_ft.model')
         return
 
     def on_batch_begin(self, batch, logs={}):
@@ -246,14 +306,11 @@ class RocCallback(Callback):
         return
 
 
-
-
 def plot_training(prediction, labels):
-
     test_y = np.array(labels)
-
-    lr_probs = prediction[:, 1]
-    lab = labels[:, 1]
+    print(len(prediction[:, 1]))
+    # lr_probs = prediction[:, 1]
+    # lab = labels[:, 1]
     lr_auc = roc_auc_score(labels, lr_probs)
     lr_fpr, lr_tpr, _ = roc_curve(lab, lr_probs)
     print('Logistic: ROC AUC=%.3f' % (lr_auc))
@@ -262,70 +319,55 @@ def plot_training(prediction, labels):
     plt.ylabel('True Positive Rate')
     plt.legend()
     plt.show()
-    # acc = history.history['acc']
-    # val_acc = history.history['val_acc']
-    # loss = history.history['loss']
-    # val_loss = history.history['val_loss']
-    # epochs = range(len(acc))
-    # plt.plot(epochs, acc, 'r.')
-    # plt.plot(epochs, val_acc, 'r')
-    # plt.title('Training and validation accuracy')
-    #
-    # plt.figure()
-    # plt.plot(epochs, loss, 'r.')
-    # plt.plot(epochs, val_loss, 'r-')
-    # plt.title('Training and validation loss')
-    # plt.show()
 
 
 def f1_score(predictions, labels):
-
-    fs = np.zeros((4))          # 0-tp, 1-fp, 2-fn, 3-tn
-    for i  in range(len(predictions)):
-        if labels[i]==1 and predictions[i]==1:
-            fs[0]+=1
-        elif labels[i]==1 and predictions[i]==0:
-            fs[2]+=1
-        elif labels[i]==0 and predictions[i]==1:
-            fs[1]+=1
+    fs = np.zeros((4))  # 0-tp, 1-fp, 2-fn, 3-tn
+    for i in range(len(predictions)):
+        if labels[i] == 1 and predictions[i] == 1:
+            fs[0] += 1
+        elif labels[i] == 1 and predictions[i] == 0:
+            fs[2] += 1
+        elif labels[i] == 0 and predictions[i] == 1:
+            fs[1] += 1
         else:
-            fs[3]+=1
-    precision = fs[0]/(fs[0]+fs[1])
-    recall = fs[0]/(fs[0]+fs[2])
+            fs[3] += 1
+    precision = fs[0] / (fs[0] + fs[1])
+    recall = fs[0] / (fs[0] + fs[2])
 
-    f1score = 2*precision*recall/(precision+recall)
+    f1score = 2 * precision * recall / (precision + recall)
     return f1score
-        # print(predictions[i], labels[i])
+    # print(predictions[i], labels[i])
 
 
-
-class IntervalEvaluation(Callback):
-    def __init__(self, validation_generator, interval=1):
-        super(Callback, self).__init__()
-        self.interval = interval
-        self.validation_generator = validation_generator
-        # self.X_val
-        # self.y_val
-
-    # def on_epoch_end(self, epoch, logs={}):
-    #     if epoch % self.interval == 0:
-    #         y_pred = self.model.predict_proba(self.X_val, verbose=0)
-    #         score = roc_auc_score(self.y_val, y_pred)
-    #         print("interval evaluation - epoch: {:d} - score: {:.6f}".format(epoch, score))
-    def custom_callback(self, epoch, logs):
-        if epoch%self.interval==0:
-            prediction = self.model.predict_generator(self.validation_generator, verbose=0)
-            score = roc_auc_score(self.validation_generator.classes, prediction)
-            print("interval evaluation - epoch: {:d} - score : {:6f}".format(epoch, score))
+# class IntervalEvaluation(Callback):
+#     def __init__(self, validation_generator, interval=1):
+#         super(Callback, self).__init__()
+#         self.interval = interval
+#         self.validation_generator = validation_generator
+#         # self.X_val
+#         # self.y_val
+#
+#     # def on_epoch_end(self, epoch, logs={}):
+#     #     if epoch % self.interval == 0:
+#     #         y_pred = self.model.predict_proba(self.X_val, verbose=0)
+#     #         score = roc_auc_score(self.y_val, y_pred)
+#     #         print("interval evaluation - epoch: {:d} - score: {:.6f}".format(epoch, score))
+#     def custom_callback(self, epoch, logs):
+#         if epoch%self.interval==0:
+#             prediction = self.model.predict_generator(self.validation_generator,
+#                                                       steps=len(self.validation_generator.filenames)//BAT_SIZE)
+#             score = roc_auc_score(self.validation_generator.classes, prediction)
+#             print("interval evaluation - epoch: {:d} - score : {:6f}".format(epoch, score))
 
 
 if __name__ == "__main__":
     a = argparse.ArgumentParser()
-    a.add_argument("--train_dir", default='./finalDataset/train/')
-    a.add_argument("--val_dir", default='./finalDataset/val/')
-    a.add_argument("--nb_epoch", default=NB_EPOCHS)
+    a.add_argument("--train_dir", default='./claheImages/train/')
+    a.add_argument("--val_dir", default='./claheImages/val/')
+    # a.add_argument("--nb_epoch", default=NB_EPOCHS)
     a.add_argument("--batch_size", default=BAT_SIZE)
-    a.add_argument("--output_model_file", default="vgg-ft4.model")
+    a.add_argument("--output_model_file", default="vgg_ft.model")
     a.add_argument("--plot", action="store_true", default=True)
 
     args = a.parse_args()

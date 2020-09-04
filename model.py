@@ -1,5 +1,3 @@
-import keras as K
-import tensorflow as tf
 from os import path
 from keras.models import Sequential
 from keras.layers import Dense, Conv2D, MaxPool2D, Flatten, Dropout
@@ -7,18 +5,22 @@ from keras.preprocessing.image import ImageDataGenerator
 from keras.optimizers import Adam, SGD
 from keras.callbacks import ModelCheckpoint, EarlyStopping
 from keras.utils.np_utils import to_categorical
-import matplotlib.pyplot as plt
 from keras.callbacks import Callback
 from sklearn.metrics import roc_auc_score
+from metrics import metric
+from sklearn.metrics import roc_curve, roc_auc_score
+
 import numpy as np
+import matplotlib.pyplot as pyplot
+import pandas as pd
 import sys
 import math
 
-batch_size = 4
+batch_size = 16
 num_classes = 2
-num_epochs = 0
-train_in = './finalDataset/train'
-test_in = './finalDataset/val'
+num_epochs = 10
+train = './claheImages/train'
+test = './claheImages/val'
 
 
 # def auc_roc(generator):
@@ -72,7 +74,10 @@ class RocCallback(Callback):
     def on_batch_end(self, batch, logs={}):
         return
 
+
+
 def setup_generators(train_in, test_in):
+
     tr_data = ImageDataGenerator(rescale=1. / 255)
     train_data_generator = tr_data.flow_from_directory(directory=train_in,
                                                        target_size=(175, 175),
@@ -139,7 +144,7 @@ def def_model():
     model.add(Dense(units=2, activation="sigmoid"))
 
     opt = Adam(lr=0.001)
-    model.compile(optimizer=SGD(lr=0.0001, momentum=0.9),
+    model.compile(optimizer=opt,
                   loss='binary_crossentropy',
                   metrics=['acc'])
     return model
@@ -147,61 +152,102 @@ def def_model():
 # keras.losses.categorical_crossentropy for multiclass!
 
 
-model = def_model()
+def f1_score(predictions, labels):
+    fs = np.zeros((4))  # 0-tp, 1-fp, 2-fn, 3-tn
+    for i in range(len(predictions)):
+        if labels[i] == 1 and predictions[i] == 1:
+            fs[0] += 1
+        elif labels[i] == 1 and predictions[i] == 0:
+            fs[2] += 1
+        elif labels[i] == 0 and predictions[i] == 1:
+            fs[1] += 1
+        else:
+            fs[3] += 1
+    precision = fs[0] / (fs[0] + fs[1])
+    recall = fs[0] / (fs[0] + fs[2])
 
-model.summary()
+    f1score = 2 * precision * recall / (precision + recall)
+    return f1score
 
 
-train_data_generator,test_data_generator = setup_generators(train_in, test_in)
+if __name__ == "__main__":
 
-model_weights = './untrained_vgg16.h5'
-if path.exists(model_weights):
-    model.load_weights(model_weights)
+    model = def_model()
 
-checkpoint = ModelCheckpoint("utvgg_norm.h5",
-                             monitor='val_acc',
-                             verbose=1,
-                             save_best_only=True,
-                             save_weights_only=False,
-                             mode='auto',
-                             period=1)
-# quit()
-# early = EarlyStopping(monitor='val_acc',
-#                       min_delta=0,
-#                       patience=20,
-#                       verbose=1,
-#                       mode='auto')
+    model.summary()
 
-history = model.fit_generator(steps_per_epoch=len(train_data_generator.filenames) // batch_size,
-                              generator=train_data_generator,
-                              validation_data=test_data_generator,
-                              validation_steps=10,
-                              epochs=num_epochs,
-                              callbacks=[checkpoint, RocCallback(test_data_generator)])
 
-# acc = history.history['acc']
-# val_acc = history.history['val_acc']
-# loss = history.history['loss']
-# val_loss = history.history['val_loss']
-#
-# epochs = range(len(acc))
-#
-# plt.plot(epochs, acc, 'r')
-# plt.plot(epochs, acc, 'r')
-# plt.title('Training and validation accuracy')
-# plt.figure()
-#
-# plt.plot(epochs, loss, 'r')
-# plt.plot(epochs, val_loss, 'r')
+    neg = 27216 + 1015
+    pos = 5920 + 953
+    total = neg + pos
+    print('Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of total)\n'.format(total, pos, 100 * pos / total))
 
-model.save_weights('utvgg_norm.h5.h5')
+    weight_for_0 = (1 / neg) * (total) / 2.0
+    weight_for_1 = (1 / pos) * (total) / 2.0
 
-# print(len(test_data_generator.filenames))
-# print(test_data_generator.filenames)
-prediction = model.predict_generator(test_data_generator,
-                                     steps=len(test_data_generator.filenames))
-# print(prediction)
-# np.save('predictions.txt', prediction)
+    class_weight = {0: weight_for_0, 1: weight_for_1}
+    print('Weight for class 0: {:.2f}'.format(weight_for_0))
+    print('Weight for class 1: {:.2f}'.format(weight_for_1))
 
 
 
+    train_data_generator, test_data_generator = setup_generators(train, test)
+
+    val_labels = test_data_generator.classes
+    validation_labels = to_categorical(val_labels, num_classes=2)
+    model_weights = './ut_ci_vgg16.h5'
+    if path.exists(model_weights):
+        model.load_weights(model_weights)
+
+    checkpoint = ModelCheckpoint("utvgg_norm.h5",
+                                 monitor='val_acc',
+                                 verbose=1,
+                                 save_best_only=True,
+                                 save_weights_only=False,
+                                 mode='auto',
+                                 period=1)
+    # quit()
+    # early = EarlyStopping(monitor='val_acc',
+    #                       min_delta=0,
+    #                       patience=20,
+    #                       verbose=1,
+    #                       mode='auto')
+
+    history = model.fit_generator(steps_per_epoch=len(train_data_generator.filenames) // batch_size,
+                                  generator=train_data_generator,
+                                  validation_data=test_data_generator,
+                                  epochs=num_epochs,
+                                  class_weight=class_weight,
+                                  callbacks=[checkpoint, RocCallback(test_data_generator)])
+
+    model.save_weights('utvgg_norm.h5.h5')
+
+
+    # print(len(test_data_generator.filenames))
+    # print(test_data_generator.filenames)
+    prediction = model.predict_generator(test_data_generator,
+                                         steps=len(test_data_generator.filenames))
+
+    f1score = f1_score(prediction, val_labels)
+    print("F1 Score is", f1score)
+
+
+    test_y = [validation_labels]
+    pred_y = [prediction]
+    roc_val = roc_auc_score(test_y, pred_y)
+    print('Logistic: ROC AUC=%.3f' % (roc_val))
+    lr_fpr, lr_tpr, _ = roc_curve(test_y, pred_y)
+    pyplot.plot(lr_fpr, lr_tpr, marker='.', label='Logistic')
+    pyplot.xlabel('False Positive Rate')
+    pyplot.ylabel('True Positive Rate')
+
+    filenames = test_data_generator.filenames
+    labels = test_data_generator.class_indices
+    labels = dict((v, k) for k, v in labels.items())
+    # print(labels)
+    predictions = [labels[k] for k in prediction]
+    results = pd.DataFrame({"Filename": filenames,
+                            "Predictions": predictions,
+                            "Label": val_labels})
+    results.to_csv("ut_ci_results30.csv", index=False)
+    metric("ut_ci_results30.csv")
