@@ -6,20 +6,25 @@ This Repository will feature 2 models, a binary classifier to predict proliferat
 mild, moderate and no DR categories respectively. 
 
 Started with a VGG16 model, of 3 types
-1. Pretrained on imagenet 
-2. Untrained and randomly initialised
-3. Fine tuned with 10-12 frozen layers. 
+1. Pretrained on imagenet (__train.py__)
+2. Untrained and randomly initialised (__model.py__)
+3. Fine tuned with 10-12 frozen layers  (__ft_vgg.py__) 
 
-
-Hence we move onto the next phase of the problem, cropping and image normalization to highlight the differentiating factors. 
-
+Format of dataset(normalised)
+->dataset
+	->train
+		->0
+		->1
+	->val
+		->0
+		->1
 
 ## Preprocessing : 
 
-- The initial dataset consisted of various color fundus images of varying resolutions which were too large to train on my gpu(1050Ti) and so I downscaled them to 600*400. 
+- The initial dataset consisted of various color fundus images of varying resolutions which are too large to train on (1050Ti) a smaller gpu so they have been downscaled them to 600*400. 
 - The retina image normalisation code is present in preprocessing_fundus and scale_and_normalise.py respectively. These scripts were used by the kaggle dr challenge winners. 
-- But instead of normalising, I have used Constrast limited adaptive histogram equalisation. 
-The resulting images are much more suited for classification purposes.
+- But instead of just normalising, we first use a technique called Constrast limited adaptive histogram equalisation, run (__preprocessing_fundus.py__). 
+The resulting images are much more suited for classification purposes.These images can now be normalised by running (__scale_and_normalise.py__)
 - There is potential to crop these images and further drop the resolution to 400*400.
 
 
@@ -41,4 +46,6 @@ This can also be seen in the Auc curve showing that our model is a no skill mode
 
 
 __After Pretraining__
-To remove the misleading accuracy metric, class_weights are used in proportion to the imbalance in the two categories ~(27k for 0 and 8k for 1). 
+
+Class_weights are used in proportion to the imbalance in the two categories ~(27k for 0 and 8k for 1). 
+The image data generator uses preprocessing function for all cnn's in keras applications. No need to rescale pixels value to 1/255
