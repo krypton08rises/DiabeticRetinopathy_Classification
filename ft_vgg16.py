@@ -11,7 +11,6 @@ import matplotlib.pyplot as pyplot
 import tensorflow as tf
 
 from keras import __version__
-# from keras.applications.inception_v3 import InceptionV3, preprocess_input
 from metrics import metric
 from keras import applications
 from keras.models import Model
@@ -22,14 +21,15 @@ from keras.metrics import categorical_accuracy
 from sklearn.metrics import roc_curve, roc_auc_score, accuracy_score, classification_report, cohen_kappa_score
 from keras.utils.np_utils import to_categorical
 from keras.callbacks import Callback, ModelCheckpoint, EarlyStopping
-from tensorflow.metrics import precision, recall, auc
+from keras.applications.vgg16 import preprocess_input
 
-IM_WIDTH, IM_HEIGHT = 224, 224  # fixed size for InceptionV3
-NB_EPOCHS_TL = 0
-NB_EPOCHS_FT = 20
+IM_WIDTH, IM_HEIGHT = 300, 300  # fixed size for InceptionV3
+NB_EPOCHS_TL = 1
+NB_EPOCHS_FT = 2
 BAT_SIZE = 16
 FC_SIZE = 1024
 NB_VGG_LAYERS_TO_FREEZE = 10
+NB_RESNET_LAYERS_TO_FREEZE = 50
 
 
 def get_nb_files(directory):
@@ -51,7 +51,10 @@ def setup_to_transfer_learn(model, base_model):
     """Freeze all layers and compile the model"""
     for layer in base_model.layers:
         layer.trainable = False
-    model.compile(optimizer=Adam(lr=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
+    for i, layer in enumerate(model.layers):
+        print(i, layer.name)
+        print(layer.trainable)
+    model.compile(optimizer=Adam(lr=0.0001), loss='categorical_crossentropy', metrics=['categorical_accuracy'])
 
 
 def add_new_last_layer(base_model, nb_classes):
@@ -66,7 +69,7 @@ def add_new_last_layer(base_model, nb_classes):
     x = base_model.output
     x = GlobalAveragePooling2D()(x)
     x = Dense(FC_SIZE, activation='relu')(x)  # new FC layer, random init
-    predictions = Dense(nb_classes, activation='sigmoid')(x)  # new softmax layer
+    predictions = Dense(nb_classes, activation='softmax')(x)  # new softmax layer
     model = Model(input=base_model.input, output=predictions)
     return model
 
@@ -77,58 +80,44 @@ def setup_to_finetune(model):
     note: NB_IV3_LAYERS corresponds to the top 2 inception blocks in the inceptionv3 arch
     Args:
     model: keras model
-  """
-    for layer in model.layers[:NB_VGG_LAYERS_TO_FREEZE]:
-        layer.trainable = False
-    for layer in model.layers[NB_VGG_LAYERS_TO_FREEZE:]:
-        layer.trainable = True
+    """
+
+    count = NB_VGG_LAYERS_TO_FREEZE
+    for layer in model.layers:
+        if count>=0 or layer.name[-4:]=='pool':
+            layer.trainable=False
+        else :
+            layer.trainable=True
+        count-=1
+    # for i, layer in enumerate(model.layers):
+    #     print(i, layer.name)
+    #     print(layer.trainable)
+    # for layer in model.layers[:NB_VGG_LAYERS_TO_FREEZE]:
+    #     layer.trainable = False
+    # for layer in model.layers[NB_VGG_LAYERS_TO_FREEZE:]:
+    #     layer.trainable = True
 
     opt = Adam(lr=0.0001)
-    # model.compile(optimizer=opt,
-    #               loss='binary_crossentropy',
-    #               metrics=['accuracy', 'auc'])
     model.compile(optimizer=SGD(lr=0.0001, momentum=0.9),
                   loss='categorical_crossentropy',
-                  metrics=['accuracy', 'categorical_accuracy'])
+                  metrics=['categorical_accuracy'])
 
-
-# def quadratic_kappa(y_hat, y):
-# return torch.tensor(cohen_kappa_score(torch.argmax(y_hat,1), y, weights='quadratic'),device='cuda:0')
 
 
 def train(args):
+
     """
     Use transfer learning and fine-tuning to train a network on a new dataset
     """
+
     nb_train_samples = get_nb_files(args.train_dir)
     nb_classes = len(glob.glob(args.train_dir + "/*"))
     nb_val_samples = get_nb_files(args.val_dir)
-    # nb_epoch = int(args.nb_epoch)
     batch_size = int(args.batch_size)
-    # print(nb_val_samples // batch_size)
 
     # data prep
-    train_datagen = ImageDataGenerator(rescale=1. / 255)
-    test_datagen = ImageDataGenerator(rescale=1. / 255)
-
-    # train_datagen = ImageDataGenerator(
-    #     preprocessing_function=preprocess_input,
-    #     rotation_range=30,
-    #     width_shift_range=0.2,
-    #     height_shift_range=0.2,
-    #     shear_range=0.2,
-    #     zoom_range=0.2,
-    #     horizontal_flip=True
-    # )
-    # test_datagen = ImageDataGenerator(
-    #     preprocessing_function=preprocess_input
-    #     rotation_range=30,
-    #     width_shift_range=0.2,
-    #     height_shift_range=0.2,
-    #     shear_range=0.2,
-    #     zoom_range=0.2,
-    #     horizontal_flip=True
-    # )
+    train_datagen = ImageDataGenerator(rescale=1/255)
+    test_datagen = ImageDataGenerator(rescale=1/255)
 
     train_generator = train_datagen.flow_from_directory(args.train_dir,
                                                         target_size=(IM_WIDTH, IM_HEIGHT),
@@ -142,18 +131,15 @@ def train(args):
                                                             class_mode='categorical',
                                                             shuffle=True)
     val_labels = validation_generator.classes
-    # print("validation_labels : ", validation_labels.shape)
-    validation_labels = to_categorical(val_labels, num_classes=2)
-    # print("validation_labels now : ", validation_labels.shape)
+    # validation_labels = to_categorical(val_labels, num_classes=2)
 
 
     # setting up class weights for imbalanced dataset ...
-    # Scaling by total/2 helps keep the loss to a similar magnitude.
     # The sum of the weights of all examples stays the same.
 
 
     neg = 27216 + 1015
-    pos = 5920 + 953
+    pos = 5920 + 953 + 7905
     total = neg + pos
     print('Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of total)\n'.format(total, pos, 100 * pos / total))
 
@@ -166,15 +152,21 @@ def train(args):
     print('Weight for class 1: {:.2f}'.format(weight_for_1))
 
     # setup model
-    # base_model = InceptionV3(weights='imagenet', include_top=False)  # include_top=False excludes final FC layer
-    # base_model = applications.VGG16(weights='imagenet', include_top=False)
-    # print("NUmber of vgg layers :", len(base_model.layers))
+    # model = K.models.load_model('./vgg_ft_ci20.model')
+    base_model = applications.VGG16(weights='imagenet', include_top=False, input_shape=(300, 300, 3))
+    print("Number of vgg layers :", len(base_model.layers))
+
+    # adding fully connected layer
+    model = add_new_last_layer(base_model, nb_classes)
+
+    # transfer learning...
 
 
-    # model = add_new_last_layer(base_model, nb_classes)
+    setup_to_transfer_learn(model, base_model)
 
-    # transfer learning
-    # setup_to_transfer_learn(model, base_model)
+    for i, layer in enumerate(model.layers):
+        print(i, layer.name)
+        print(layer.trainable)
 
     # checkpoint = ModelCheckpoint("ft_vgg16.h5",
     #                              monitor=RocCallback(validation_generator),    # not working with custom callbacks
@@ -184,21 +176,22 @@ def train(args):
     #                              mode='auto',
     #                              period=1)
 
-    # print('Transfer Learning is starting...')
-    # history_tl = model.fit_generator(train_generator,
-    #                                  nb_epoch=NB_EPOCHS_TL,
-    #                                  samples_per_epoch=nb_train_samples,
-    #                                  validation_data=validation_generator,
-    #                                  nb_val_samples=nb_val_samples,
-    #                                  class_weight=class_weight,
-    #                                  callbacks=[RocCallback(validation_generator)])
-
-    model = K.models.load_model(args.output_model_file)
+    print('Transfer Learning is starting...')
+    history_tl = model.fit_generator(train_generator,
+                                     nb_epoch=NB_EPOCHS_TL,
+                                     samples_per_epoch=nb_train_samples,
+                                     validation_data=validation_generator,
+                                     nb_val_samples=nb_val_samples,
+                                     class_weight=class_weight,
+                                     callbacks=[RocCallback(validation_generator)])
 
     # fine-tuning ...
     setup_to_finetune(model)
+    for i, layer in enumerate(model.layers):
+        print(i, layer.name)
+        print(layer.trainable)
 
-    # EarlyStopping()
+    # model.summary()
 
     print('Fine tuning is starting...')
     history_ft = model.fit_generator(train_generator,
@@ -209,51 +202,39 @@ def train(args):
                                      class_weight=class_weight,
                                      callbacks=[RocCallback(validation_generator)])
 
-    # making predictions ...
-    model.save(args.output_model_file)
+    # making predictions ...3
+    model.save('./experiment5/vgg_ft_ni20.model')
     pred = model.predict_generator(validation_generator,
                                    steps=len(validation_generator.filenames) // batch_size)
     pred_Y_cat = np.argmax(pred, -1)
-    for i in range(len(val_labels)):
-        print(pred[i], val_labels[i])
-    # print('Accuracy on Test Data: %2.2f%%' % (accuracy_score(validation_labels, pred_Y_cat)))
-    # print(classification_report(validation_labels, pred_Y_cat))
 
 
     # F1Score ...
     predictions = np.argmax(pred, axis=1)
     f1score = f1_score(predictions, val_labels)
-
     print("F1 Score is", f1score)
-
-
-    # ROC_AUC ...
-    if NB_EPOCHS_FT == 0 and NB_EPOCHS_TL == 0:
-        test_y = [validation_labels]
-        pred_y = [pred]
-        roc_val = roc_auc_score(test_y, pred_y)
-        print('Logistic: ROC AUC=%.3f' % (roc_val))
-        lr_fpr, lr_tpr, _ = roc_curve(test_y, pred_y)
-        pyplot.plot(lr_fpr, lr_tpr, marker='.', label='Logistic')
-        pyplot.xlabel('False Positive Rate')
-        pyplot.ylabel('True Positive Rate')
 
 
     # Storing Predictions as CSV ...
     filenames = validation_generator.filenames
     labels = validation_generator.class_indices
     labels = dict((v, k) for k, v in labels.items())
-    # print(labels)
     predictions = [labels[k] for k in predictions]
     results = pd.DataFrame({"Filename": filenames,
+                            "true":pred[:, 1],
                             "Predictions": predictions,
                             "Label": val_labels})
-    results.to_csv("ft_ci_results30.csv", index=False)
-    metric("ft_ci_results30.csv")
-    # plotting data
-    # print(pred.shape, validation_labels.shape)
-    # if args.plot:
-    #     plot_training(pred, validation_labels)
+    results.to_csv("./experiment5/ft_ni_results30.csv", index=False)
+    metric("./experiment5/ft_ni_results20.csv")
+
+    # plotting data...
+    if args.plot:
+        plot_training(pred, val_labels)
+
+
+def kappa_score(y_pred, y_true):
+    skl_score = cohen_kappa_score(y_true, y_pred, weights='quadratic')
+    return skl_score
 
 
 # Callback to area under the curve ...
@@ -262,7 +243,7 @@ class RocCallback(Callback):
         # self.x = training_data[0]
         # self.y = training_data.classes
         self.x_val = validation_data
-        self.y_val = to_categorical(validation_data.classes, num_classes=2)
+        self.y_val = validation_data.classes
         self.best = 0
 
     def on_train_begin(self, logs={}):
@@ -279,14 +260,7 @@ class RocCallback(Callback):
         # roc_train = roc_auc_score(self.y, y_pred_train)
         # y_pred_val = self.model.predict_proba(self.x_val)
         y_pred_val = self.model.predict_generator(self.x_val, steps=len(self.x_val.filenames) // BAT_SIZE)
-        roc_val = roc_auc_score(self.y_val, y_pred_val)
-        if NB_EPOCHS_FT == 0 and NB_EPOCHS_TL == 0:
-            lr_fpr, lr_tpr, _ = roc_curve(self.y_val, y_pred_val)
-            pyplot.plot(lr_fpr, lr_tpr, marker='.', label='Logistic')
-            pyplot.xlabel('False Positive Rate')
-            pyplot.ylabel('True Positive Rate')
-            pyplot.legend()
-            pyplot.show()
+        roc_val = roc_auc_score(self.y_val, y_pred_val[:, 1])
 
         # print('\rroc-auc_train: %s - roc-auc_val: %s' % (str(round(roc_train,4)),str(round(roc_val,4))),end=100*'
         # '+'\n')
@@ -296,7 +270,7 @@ class RocCallback(Callback):
                   end=100 * ' ' + '\n')
             print('Saving model ...')
             self.best = roc_val
-            self.model.save('vgg_ft.model')
+            self.model.save('./experiment5/vgg_ft_ni30.model')
         return
 
     def on_batch_begin(self, batch, logs={}):
@@ -307,12 +281,9 @@ class RocCallback(Callback):
 
 
 def plot_training(prediction, labels):
-    test_y = np.array(labels)
-    print(len(prediction[:, 1]))
-    # lr_probs = prediction[:, 1]
-    # lab = labels[:, 1]
+    lr_probs = prediction[:, 1]
     lr_auc = roc_auc_score(labels, lr_probs)
-    lr_fpr, lr_tpr, _ = roc_curve(lab, lr_probs)
+    lr_fpr, lr_tpr, _ = roc_curve(labels, lr_probs)
     print('Logistic: ROC AUC=%.3f' % (lr_auc))
     plt.plot(lr_fpr, lr_tpr, marker='.', label='Logistic')
     plt.xlabel('False Positive Rate')
@@ -337,37 +308,13 @@ def f1_score(predictions, labels):
 
     f1score = 2 * precision * recall / (precision + recall)
     return f1score
-    # print(predictions[i], labels[i])
-
-
-# class IntervalEvaluation(Callback):
-#     def __init__(self, validation_generator, interval=1):
-#         super(Callback, self).__init__()
-#         self.interval = interval
-#         self.validation_generator = validation_generator
-#         # self.X_val
-#         # self.y_val
-#
-#     # def on_epoch_end(self, epoch, logs={}):
-#     #     if epoch % self.interval == 0:
-#     #         y_pred = self.model.predict_proba(self.X_val, verbose=0)
-#     #         score = roc_auc_score(self.y_val, y_pred)
-#     #         print("interval evaluation - epoch: {:d} - score: {:.6f}".format(epoch, score))
-#     def custom_callback(self, epoch, logs):
-#         if epoch%self.interval==0:
-#             prediction = self.model.predict_generator(self.validation_generator,
-#                                                       steps=len(self.validation_generator.filenames)//BAT_SIZE)
-#             score = roc_auc_score(self.validation_generator.classes, prediction)
-#             print("interval evaluation - epoch: {:d} - score : {:6f}".format(epoch, score))
 
 
 if __name__ == "__main__":
     a = argparse.ArgumentParser()
-    a.add_argument("--train_dir", default='./claheImages/train/')
-    a.add_argument("--val_dir", default='./claheImages/val/')
-    # a.add_argument("--nb_epoch", default=NB_EPOCHS)
+    a.add_argument("--train_dir", default='./finalDataset/train/')
+    a.add_argument("--val_dir", default='./finalDataset/val/')
     a.add_argument("--batch_size", default=BAT_SIZE)
-    a.add_argument("--output_model_file", default="vgg_ft.model")
     a.add_argument("--plot", action="store_true", default=True)
 
     args = a.parse_args()
