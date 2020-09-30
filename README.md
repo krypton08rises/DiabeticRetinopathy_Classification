@@ -12,40 +12,36 @@ Started with a VGG16 model, of 3 types
 
 Format of dataset(normalised)
 ->dataset
-	->train
+	->train	
 		->0
 		->1
 	->val
 		->0
 		->1
 
-## Preprocessing : 
+## Preprocessing : 	
 
 - The initial dataset consisted of various color fundus images of varying resolutions which are too large to train on (1050Ti) a smaller gpu so they have been downscaled them to 600*400. 
 - The retina image normalisation code is present in preprocessing_fundus and scale_and_normalise.py respectively. These scripts were used by the kaggle dr challenge winners. 
 - But instead of just normalising, we first use a technique called Constrast limited adaptive histogram equalisation, run (__preprocessing_fundus.py__). 
-The resulting images are much more suited for classification purposes.These images can now be normalised by running (__scale_and_normalise.py__)
-- There is potential to crop these images and further drop the resolution to 400*400.
+- The resulting images are much more suited for classification purposes.These images can now be normalised by running (__scale_and_normalise.py__)
+### Augmentation :
+- Only part of the dataset is augmented, namely the severe and proliferate categories(total ~1500 images). 
+- The dataset is augmented, using only simple rotation(horizontal, vertical, both), and brightening(/diming).
+- The resulting dataset has 7500 additional images (1500*5)
+
+## Experiment : 
+__Setup__ 
+
+- An imagedatagenerator is used to pass the images to the network. There is no rescaling, or augmentation in the data generator. 
+- Class weights are setup because of the imbalanced nature of the dataset. 
+- The dataset contains all the original images from the kaggle DR dataset + 7500 augmented images.
+- There are 2 experimental setups, one with only the Clahe images and one with the Clahe+Normalised images
+- The last layer of the VGG16 is replaced by a dense layer mapping out to a softmax function.
+- Training occurs in 2 steps,
+1. Transfer Learning of the final layer with original imagenet weights intact. 
+2. Fine Tuning with the first 3 layers frozen and the rest of the network retrained for 35 epochs.
 
 
-## Experiments : 
-
-An imagedatagenerator is used to pass the images to the network. No augmentation is used since the dataset is already large enough. 
-
-__Before Pretraining__ 
-VGG16_pretrained was relatively easy to train, reaching 82% accuracy in 50 epochs of the entire batch of ~34000 images. But it was still giving 
-validation accuracy of just ~62-65% because it had not yet learned to predict the severe categories of the dataset, since most of the images (~28000)
-were of the mild or no DR category. Additionally, the smaller resolution of just (224, 224) which was a loss of a factor of 100 pixel density 
-was contributing to this adaptation of the most important features of the retina images. Hence there was a huge requirement of preprocessing and 
-completely removing the 
-
-
-_Specificity_ - 0.9917355371900827 
-_Sensitivity_ - 0.0759493670886076 --> clear indication of poor performance while determining severe DR cases
-This can also be seen in the Auc curve showing that our model is a no skill model, and has not yet learned the differentiating features of severe and no DR retina images. 
-
-
-__After Pretraining__
-
-Class_weights are used in proportion to the imbalance in the two categories ~(27k for 0 and 8k for 1). 
-The image data generator uses preprocessing function for all cnn's in keras applications. No need to rescale pixels value to 1/255
+## Results :
+The model was trained for 35 epochs and it reached an f1score of 99% on the training set and 80% on validation set. The area under the ROC curve came out to be 0.87 and the model scored an F1 Score of 0.77!
