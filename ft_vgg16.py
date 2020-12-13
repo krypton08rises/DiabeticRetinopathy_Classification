@@ -23,7 +23,7 @@ from keras.utils.np_utils import to_categorical
 from keras.callbacks import Callback, ModelCheckpoint, EarlyStopping
 from keras.applications.vgg16 import preprocess_input
 import keras.backend as K
-from metrics import metric
+
 
 IM_WIDTH, IM_HEIGHT = 300, 300
 NB_EPOCHS_TL = 0
@@ -33,8 +33,14 @@ FC_SIZE = 1024
 NB_VGG_LAYERS_TO_FREEZE = 3
 
 
-def visualize_class_activation_map(model, img_path, output_path):
+def get_output_layer(model, layer_name):
+    # get the symbolic outputs of each "key" layer (we gave them unique names).
+    layer_dict = dict([(layer.name, layer) for layer in model.layers])
+    layer = layer_dict[layer_name]
+    return layer
 
+
+def visualize_class_activation_map(model, img_path, output_path):
     img = cv2.imread(img_path, 1)
     # img = cv2.resize(img, (299, 299), interpolation=cv2.INTER_AREA)
     width, height, _ = img.shape
@@ -191,7 +197,7 @@ def train(args):
 
     # setup model
     # model = keras.models.load_model('./experiment/vgg_ft_ni10.model')
-    base_model = applications.VGG16(weights='imagenet', include_top=False, input_shape=(300, 300, 3))
+    base_model = applications.Xception(weights='imagenet', include_top=False, input_shape=(300, 300, 3))
     print("Number of vgg layers :", len(base_model.layers))
 
     # adding fully connected layer
@@ -213,6 +219,7 @@ def train(args):
     #                              period=1)
 
     print('Transfer Learning is starting...')
+    # model.save_weights('') # Please input weights if present
     history_tl = model.fit_generator(train_generator,
                                      nb_epoch=NB_EPOCHS_TL,
                                      samples_per_epoch=nb_train_samples,
@@ -226,7 +233,7 @@ def train(args):
     for i, layer in enumerate(model.layers):
         print(i, layer.name)
         print(layer.trainable)
-    model.load_weights('./experiment/vgg_ft_ni25.h5')
+    # model.load_weights('./experiment/vgg_ft_ni25.h5')
     # model.summary()
 
     print('Fine tuning is starting...')
@@ -264,6 +271,14 @@ def train(args):
     # plotting data...
     if args.plot:
         plot_training(pred, val_labels)
+
+    input_path = args.val_dir + pos_class_label
+    output_path = './models/vgg/epoch_{}/'.format(NB_EPOCHS_TL+NB_EPOCHS_FT)
+
+
+    # visualising activation maps of positive class ...
+    for img in validation_generator.filenames:
+        visualize_class_activation_map(model, input_path + img, output_path + img)
 
 
 def kappa_score(y_pred, y_true):
