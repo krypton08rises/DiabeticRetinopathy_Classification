@@ -3,6 +3,7 @@ import os
 import sys
 import glob
 import argparse
+import cv2
 import matplotlib.pyplot as plt
 import keras
 import numpy as np
@@ -30,6 +31,36 @@ NB_EPOCHS_FT = 5
 BAT_SIZE = 16
 FC_SIZE = 1024
 NB_VGG_LAYERS_TO_FREEZE = 3
+
+
+def visualize_class_activation_map(model, img_path, output_path):
+
+    img = cv2.imread(img_path, 1)
+    # img = cv2.resize(img, (299, 299), interpolation=cv2.INTER_AREA)
+    width, height, _ = img.shape
+
+    inp = np.zeros((1, IM_WIDTH, IM_HEIGHT, 3))
+    # Reshape to the network input shape (3, w, h).
+    # img = np.array([np.transpose(np.float32(img), (2, 0, 1))])
+    inp[0] = img
+    # Get the 512 input weights to the softmax.
+    class_weights = model.layers[-1].get_weights()[0]
+    final_conv_layer = get_output_layer(model, "block5_conv3")
+    get_output = K.function([model.layers[0].input], [final_conv_layer.output, model.layers[-1].output])
+    [conv_outputs, predictions] = get_output([inp])
+    conv_outputs = conv_outputs[0, :, :, :]
+
+    # Create the class activation map.
+    cam = np.zeros(dtype=np.float32, shape=(18, 18))#conv_outputs.shape[1:3])
+    for i, w in enumerate(class_weights[:, 1]):
+        cam += w * conv_outputs[:, :, i]
+
+    cam /= np.max(cam)
+    cam = cv2.resize(cam, (height, width))
+    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+    heatmap[np.where(cam < 0.2)] = 0
+    img = heatmap * 0.5 + img
+    cv2.imwrite(output_path, img)
 
 
 def f1_score(y_pred, y_true):
@@ -64,7 +95,7 @@ def setup_to_transfer_learn(model, base_model):
     """Freeze all layers and compile the model"""
     for layer in base_model.layers:
         layer.trainable = False
-    model.compile(optimizer=Adam(lr=0.0001), loss='categorical_crossentropy', metrics=['categorical_accuracy', f1_score])
+    model.compile(optimizer=Adam(lr=0.001), loss='categorical_crossentropy', metrics=['categorical_accuracy', f1_score])
 
 
 def add_new_last_layer(base_model, nb_classes):
@@ -92,13 +123,6 @@ def setup_to_finetune(model):
     model: keras model
     """
 
-    # count = NB_VGG_LAYERS_TO_FREEZE
-    # for layer in model.layers:
-    #     if count>=0 or layer.name[-4:]=='pool':
-    #         layer.trainable=False
-    #     else :
-    #         layer.trainable=True
-    #     count-=1
     for layer in model.layers[:NB_VGG_LAYERS_TO_FREEZE]:
         layer.trainable = False
     for layer in model.layers[NB_VGG_LAYERS_TO_FREEZE:]:
@@ -126,8 +150,8 @@ def train(args):
 
     nb_train_samples_neg = len([name for name in os.listdir(os.path.join(args.train_dir, neg_class_label))])
     nb_train_samples_pos = len([name for name in os.listdir(os.path.join(args.train_dir, pos_class_label))])
-    print("Number of neg training examples is ",nb_train_samples_neg )
-    print("Number of pos training examples is ",nb_train_samples_pos )
+    print("Number of neg training examples is ", nb_train_samples_neg)
+    print("Number of pos training examples is ", nb_train_samples_pos)
 
 
     # data prep
@@ -154,10 +178,10 @@ def train(args):
 
 
     total = nb_train_samples_neg + nb_train_samples_pos
-    print('Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of total)\n'.format(total, nb_train_samples_pos, 100 * nb_train_samples_pos/ total))
+    print('Examples:\n    Total: {}\n    Positive: {} ({:.2f}% of total)\n'.format(total, nb_train_samples_pos, 100 * nb_train_samples_pos/total))
 
 
-    weight_for_0 =  total / nb_train_samples_neg 
+    weight_for_0 =  total / nb_train_samples_neg
     weight_for_1 =  total / nb_train_samples_pos
 
     class_weight = {0: weight_for_0, 1: weight_for_1}
@@ -176,9 +200,9 @@ def train(args):
     # transfer learning...
     setup_to_transfer_learn(model, base_model)
 
-    # for i, layer in enumerate(model.layers):
-    #     print(i, layer.name)
-    #     print(layer.trainable)
+    for i, layer in enumerate(model.layers):
+        print(i, layer.name)
+        print(layer.trainable)
 
     # checkpoint = ModelCheckpoint("ft_vgg16.h5",
     #                              monitor=RocCallback(validation_generator),    # not working with custom callbacks
@@ -188,14 +212,14 @@ def train(args):
     #                              mode='auto',
     #                              period=1)
 
-    # print('Transfer Learning is starting...')
-    # history_tl = model.fit_generator(train_generator,
-    #                                  nb_epoch=NB_EPOCHS_TL,
-    #                                  samples_per_epoch=nb_train_samples,
-    #                                  validation_data=validation_generator,
-    #                                  nb_val_samples=nb_val_samples,
-    #                                  class_weight=class_weight,
-    #                                  callbacks=[RocCallback(validation_generator)])
+    print('Transfer Learning is starting...')
+    history_tl = model.fit_generator(train_generator,
+                                     nb_epoch=NB_EPOCHS_TL,
+                                     samples_per_epoch=nb_train_samples,
+                                     validation_data=validation_generator,
+                                     nb_val_samples=nb_val_samples,
+                                     class_weight=class_weight,
+                                     callbacks=[RocCallback(validation_generator)])
 
     # fine-tuning ...
     setup_to_finetune(model)
@@ -205,17 +229,17 @@ def train(args):
     model.load_weights('./experiment/vgg_ft_ni25.h5')
     # model.summary()
 
-    # print('Fine tuning is starting...')
-    # history_ft = model.fit_generator(train_generator,
-    #                                  samples_per_epoch=nb_train_samples,
-    #                                  nb_epoch=NB_EPOCHS_FT,
-    #                                  validation_data=validation_generator,
-    #                                  nb_val_samples=nb_val_samples,
-    #                                  class_weight=class_weight,
-    #                                  callbacks=[RocCallback(validation_generator)])
+    print('Fine tuning is starting...')
+    history_ft = model.fit_generator(train_generator,
+                                     samples_per_epoch=nb_train_samples,
+                                     nb_epoch=NB_EPOCHS_FT,
+                                     validation_data=validation_generator,
+                                     nb_val_samples=nb_val_samples,
+                                     class_weight=class_weight,
+                                     callbacks=[RocCallback(validation_generator)])
 
     # making predictions ...3
-    # model.save_weights('./experiment/vgg_ft_ni25.h5')
+    model.save_weights('./experiment/vgg_ft_ni25.h5')
     # model.save('./experiment/vgg_ft_ni10.model')
     pred = model.predict_generator(validation_generator, steps=nb_val_samples//batch_size)
 
@@ -302,14 +326,10 @@ def plot_training(prediction, labels):
     plt.show()
 
 
-
-
 if __name__ == "__main__":
     a = argparse.ArgumentParser()
-    # a.add_argument("--train_dir", default='/pstore/home/maunza/kaggle_DR/lumin_norm/trainLabelsTwoClass2/train')
-    a.add_argument("--train_dir", default='./finalDataset/train')
-    a.add_argument("--val_dir", default='./finalDataset/val')
-    # a.add_argument("--val_dir", default='/pstore/home/maunza/kaggle_DR/lumin_norm/trainLabelsTwoClass2/validate')
+    a.add_argument("--train_dir", default='./normalised_dataset/train')
+    a.add_argument("--val_dir", default='./normalised_dataset/val')
     a.add_argument("--batch_size", default=BAT_SIZE)
     a.add_argument("--plot", action="store_true", default=True)
 
